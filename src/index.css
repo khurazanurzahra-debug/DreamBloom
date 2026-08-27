@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --radius: 1rem;
+  --font-heading: "Inter", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-display: "Fraunces", Georgia, serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  color: #2b2620;
+  background-color: #fff8f1;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 0px;
+  height: 0px;
+}
+
+@layer components {
+  /* Solid warm-white card — the default surface for content. No blur. */
+  .card {
+    background: #ffffff;
+    border: 1px solid rgba(43, 38, 32, 0.07);
+    box-shadow: 0 4px 14px rgba(43, 38, 32, 0.045);
+  }
+
+  /* Reserved for a few chrome elements that should feel like they float
+     above content: bottom nav, bottom sheets, popovers. */
+  .glass {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow: 0 8px 24px rgba(43, 38, 32, 0.08);
+  }
+
+  .glass-tint {
+    background: color-mix(in srgb, var(--tint, #c6a670) 14%, white 86%);
+    border: 1px solid rgba(43, 38, 32, 0.06);
+  }
+
+  .glass-dark {
+    background: #2b2620;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: 0 8px 24px rgba(43, 38, 32, 0.16);
+    color: #ffffff;
+  }
+
+  .font-body {
+    font-family: var(--font-body);
+  }
+
+  .font-heading {
+    font-family: var(--font-heading);
+  }
+
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  .label-caps {
+    font-family: var(--font-heading);
+    font-size: 0.6875rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #8c8478;
+    font-weight: 600;
+  }
+
+  .heading {
+    font-family: var(--font-heading);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+
+  .accent-serif {
+    font-family: var(--font-display);
+    font-weight: 400;
+  }
+
+  .field {
+    background: #fff8f1;
+    border: 1px solid rgba(43, 38, 32, 0.09);
+    color: #2b2620;
+    transition: border-color 0.15s ease;
+  }
+
+  .field:focus {
+    outline: none;
+    border-color: #c6a670;
+  }
+}
