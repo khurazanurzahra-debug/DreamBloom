@@ -43,6 +43,22 @@ jobs:
       - name: Add SPA fallback for GitHub Pages (404 -> index.html)
         run: cp dist/index.html dist/404.html
 
+      - name: Verify Pages artifact contents
+        run: |
+          set -e
+          echo "Checking required files exist in dist/ before upload..."
+          test -f dist/index.html || (echo "::error::dist/index.html is missing" && exit 1)
+          test -f dist/404.html || (echo "::error::dist/404.html is missing" && exit 1)
+          test -f dist/manifest.webmanifest || (echo "::error::dist/manifest.webmanifest is missing" && exit 1)
+          test -f dist/sw.js || (echo "::error::dist/sw.js is missing" && exit 1)
+          test -f dist/registerSW.js || (echo "::error::dist/registerSW.js is missing" && exit 1)
+          if ! cmp -s dist/index.html dist/404.html; then
+            echo "::error::dist/404.html is not byte-identical to dist/index.html"
+            exit 1
+          fi
+          echo "All required files present, 404.html matches index.html byte-for-byte."
+          ls -la dist/
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
