@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Trash2 } from "lucide-react";
 import { useDream } from "../../context/DreamContext";
@@ -20,11 +20,6 @@ export default function GoalEditModal({ goal, onClose }: { goal: Goal | null; on
   const [targetDate, setTargetDate] = useState(goal?.targetDate ?? "2027-01-01");
   const [notes, setNotes] = useState(goal?.notes ?? "");
   const [confirmDelete, setConfirmDelete] = useState(false);
-
-  // TEMPORARY diagnostic — remove once selection is confirmed fixed.
-  useEffect(() => {
-    console.log("[DreamBloom icon state]", icon);
-  }, [icon]);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
