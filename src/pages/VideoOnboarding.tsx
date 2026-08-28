@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { ArrowRight, Sprout } from "lucide-react";
 import { useDream } from "../context/DreamContext";
 
-const VIDEO_URL = "/videos/onboarding.mp4";
+const VIDEO_URL = `${import.meta.env.BASE_URL}videos/onboarding.mp4`;
 
 export default function VideoOnboarding() {
   const navigate = useNavigate();
