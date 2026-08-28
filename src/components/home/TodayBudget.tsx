@@ -15,7 +15,10 @@ export default function TodayBudget() {
   const filtered = useFilteredTransactions();
 
   const todayIso = new Date().toISOString().slice(0, 10);
-  const items = categories.filter((c) => BUDGET_CATEGORY_IDS.includes(c.id) && c.budgetAmount);
+  // The curated 3 (Makan/Bensin/Cash) stay exactly as before — but a custom category
+  // with a budget was previously never eligible here at all, regardless of having a
+  // perfectly valid color, purely because its id wasn't in this hardcoded list.
+  const items = categories.filter((c) => (BUDGET_CATEGORY_IDS.includes(c.id) || c.isCustom) && c.budgetAmount);
   if (items.length === 0) return null;
 
   return (

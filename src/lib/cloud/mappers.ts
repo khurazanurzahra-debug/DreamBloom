@@ -1,4 +1,5 @@
 import type { Category, Goal, Obligation, PersonProfile, Transaction } from "../../types";
+import { deterministicCategoryColor } from "../categoryColor";
 
 // Snake_case row shapes exactly matching supabase/schema.sql. Kept private to this file —
 // the rest of the app only ever sees the existing camelCase app types.
@@ -85,7 +86,11 @@ export function categoryFromRow(row: CategoryRow): Category {
     id: row.id,
     name: row.name,
     icon: row.icon,
-    color: row.color,
+    // Defensive fallback only — every write path already sets a real color, but a row
+    // that somehow reaches the app with an empty/missing color (a legacy row edited
+    // outside the app, for instance) still gets a valid, deterministic, name-based
+    // color instead of rendering with nothing.
+    color: row.color || deterministicCategoryColor(row.name),
     budgetAmount: row.budget_amount != null ? Number(row.budget_amount) : undefined,
     budgetPeriod: (row.budget_period as Category["budgetPeriod"]) ?? undefined,
     isCustom: row.is_custom,
