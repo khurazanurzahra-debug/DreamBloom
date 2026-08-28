@@ -1,32 +1,82 @@
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion } from "framer-motion";
+import { motion, useMotionValue, animate as animateMotionValue, type AnimationPlaybackControls } from "framer-motion";
 import { ArrowRight, Sprout } from "lucide-react";
 import { useDream } from "../context/DreamContext";
 
 const VIDEO_URL = `${import.meta.env.BASE_URL}videos/onboarding.mp4`;
+const ZOOM_TARGET_SCALE = 1.045;
+const ZOOM_DURATION_SECONDS = 10;
 
 export default function VideoOnboarding() {
   const navigate = useNavigate();
-  const { setHasOnboarded } = useDream();
+  const { setHasOnboarded, isCloudConfigured, isHouseholdConnected } = useDream();
+
+  // Drives the cinematic zoom via a raw motion value (bound through `style`, not the
+  // `animate` prop) so it can be paused/resumed imperatively without ever touching the
+  // <video> element's own props — the element itself never remounts or restarts.
+  const scale = useMotionValue(1);
+  const zoomControlsRef = useRef<AnimationPlaybackControls | null>(null);
+  const [isVideoReady, setIsVideoReady] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
+
+  useEffect(() => {
+    if (!isVideoReady) return;
+    if (isBuffering) {
+      // Hold the zoom exactly where it is — do not reset, do not restart.
+      zoomControlsRef.current?.pause();
+      return;
+    }
+    if (zoomControlsRef.current) {
+      zoomControlsRef.current.play();
+    } else {
+      zoomControlsRef.current = animateMotionValue(scale, ZOOM_TARGET_SCALE, {
+        duration: ZOOM_DURATION_SECONDS,
+        ease: "easeInOut",
+      });
+    }
+  }, [isVideoReady, isBuffering, scale]);
+
+  useEffect(() => {
+    return () => zoomControlsRef.current?.stop();
+  }, []);
+
+  function handleVideoReady() {
+    setIsVideoReady(true);
+  }
+  function handleWaiting() {
+    setIsBuffering(true);
+  }
+  function handlePlaying() {
+    setIsBuffering(false);
+    setIsVideoReady(true);
+  }
 
   function handleContinue() {
     setHasOnboarded(true);
-    navigate("/profile");
+    // Only ever detours to the one-time household connect step when a Supabase project
+    // is actually configured; with no env vars set, this is unchanged from before.
+    navigate(isCloudConfigured && !isHouseholdConnected ? "/connect-household" : "/profile");
   }
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-ink">
-      {/* Background video — plays normally first, then a slow one-time zoom-in toward the door */}
+      {/* Background video — plays normally first; the zoom only engages once playback has
+          actually started (canplay/loadeddata/playing), and pauses in place (no reset,
+          no remount) whenever the browser reports buffering. */}
       <motion.video
         className="absolute inset-0 z-0 h-full w-full object-cover"
+        style={{ scale, willChange: "transform" }}
         src={VIDEO_URL}
         autoPlay
         muted
         loop
         playsInline
-        initial={{ scale: 1 }}
-        animate={{ scale: 1.045 }}
-        transition={{ duration: 10, delay: 1.2, ease: "easeInOut" }}
+        preload="auto"
+        onLoadedData={handleVideoReady}
+        onCanPlay={handleVideoReady}
+        onWaiting={handleWaiting}
+        onPlaying={handlePlaying}
       />
 
       {/* Champagne shimmer */}

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   Category,
   FileCategory,
@@ -20,6 +20,35 @@ import {
 } from "../lib/mockData";
 import { getDefaultPeriod } from "../lib/dateFilter";
 import { base44 } from "../lib/base44";
+import { isSupabaseConfigured, supabase } from "../lib/cloud/supabaseClient";
+import {
+  clearStoredHouseholdId,
+  ensureSession,
+  getStoredHouseholdId,
+  joinHouseholdWithInviteCode,
+} from "../lib/cloud/household";
+import { subscribeToTable } from "../lib/cloud/realtime";
+import { migrateLocalDataToCloud } from "../lib/cloud/migration";
+import { flushPendingWrites } from "../lib/cloud/offlineQueue";
+import {
+  categoryFromRow,
+  categoryToRow,
+  goalFromRow,
+  goalToRow,
+  obligationFromRow,
+  obligationToRow,
+  profileFromRow,
+  profileToRow,
+  transactionFromRow,
+  transactionToRow,
+  type CategoryRow,
+  type GoalRow,
+  type HouseholdSettingsRow,
+  type ObligationRow,
+  type ProfileRow,
+  type TransactionRow,
+} from "../lib/cloud/mappers";
+import { cloudWrite, type SyncStatus } from "../lib/cloud/cloudWrite";
 
 const STORAGE_KEYS = {
   profiles: "dreambloom_profiles",
@@ -58,6 +87,14 @@ function writeStorage<T>(key: string, value: T) {
 
 function makeId(prefix: string): string {
   return `${prefix}${Date.now()}${Math.floor(Math.random() * 1000)}`;
+}
+
+function upsertById<T extends { id: string }>(list: T[], item: T): T[] {
+  const idx = list.findIndex((x) => x.id === item.id);
+  if (idx === -1) return [item, ...list];
+  const next = [...list];
+  next[idx] = item;
+  return next;
 }
 
 interface DreamContextValue {
@@ -113,6 +150,13 @@ interface DreamContextValue {
 
   hasOnboarded: boolean;
   setHasOnboarded: (v: boolean) => void;
+
+  // Cloud sync — additive, does not change any existing field/behavior above.
+  isCloudConfigured: boolean;
+  isHouseholdConnected: boolean;
+  syncStatus: SyncStatus;
+  connectHousehold: (inviteCode: string) => Promise<{ ok: boolean; error?: string }>;
+  disconnectHousehold: () => void;
 }
 
 const DreamContext = createContext<DreamContextValue | null>(null);
@@ -192,10 +236,181 @@ export function DreamProvider({ children }: { children: ReactNode }) {
     [selectedYear, selectedMonth]
   );
 
+  // ============================================================
+  // CLOUD SYNC — additive. When Supabase isn't configured (no env vars) or no household
+  // is connected yet, none of this runs and the app behaves exactly as the pure
+  // localStorage version above. `household_id` itself is a device-local pointer, not
+  // financial data, so it's fine to keep it in localStorage.
+  // ============================================================
+  const [householdId, setHouseholdIdInternal] = useState<string | null>(() => getStoredHouseholdId());
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
+  const cloudEnabled = isSupabaseConfigured && Boolean(householdId);
+  const snapshotRef = useRef({
+    profiles,
+    categories,
+    transactions,
+    goals,
+    obligations,
+    sharedSavingTarget,
+    goldTargetGrams,
+    gratitudeText,
+    buildingTogetherText,
+  });
+  snapshotRef.current = {
+    profiles,
+    categories,
+    transactions,
+    goals,
+    obligations,
+    sharedSavingTarget,
+    goldTargetGrams,
+    gratitudeText,
+    buildingTogetherText,
+  };
+
+  useEffect(() => {
+    if (!cloudEnabled || !supabase) return;
+    let cancelled = false;
+
+    (async () => {
+      const signedIn = await ensureSession();
+      if (!signedIn || cancelled) return;
+
+      // Upload whatever this device already had locally, exactly once ever (guarded by
+      // its own marker) — never overwrites cloud data that already exists (upsert only).
+      await migrateLocalDataToCloud(householdId as string, snapshotRef.current);
+      if (cancelled) return;
+
+      const [profilesRes, categoriesRes, obligationsRes, transactionsRes, goalsRes, settingsRes] =
+        await Promise.all([
+          supabase.from("profiles").select("*").eq("household_id", householdId as string),
+          supabase.from("categories").select("*").eq("household_id", householdId as string),
+          supabase.from("obligations").select("*").eq("household_id", householdId as string),
+          supabase.from("transactions").select("*").eq("household_id", householdId as string),
+          supabase.from("goals").select("*").eq("household_id", householdId as string),
+          supabase.from("household_settings").select("*").eq("household_id", householdId as string).maybeSingle(),
+        ]);
+      if (cancelled) return;
+
+      // A genuinely empty cloud table (no error, zero rows) must still replace stale
+      // local state — otherwise a table that's legitimately empty in the cloud would
+      // leave old local rows on screen forever. A *failed* fetch must do the opposite:
+      // never touch local state, since we can't tell "empty" from "couldn't check".
+      let hadFetchError = false;
+
+      if (!profilesRes.error) setProfiles((profilesRes.data as ProfileRow[] | null ?? []).map(profileFromRow));
+      else hadFetchError = true;
+
+      if (!categoriesRes.error)
+        setCategories((categoriesRes.data as CategoryRow[] | null ?? []).map(categoryFromRow));
+      else hadFetchError = true;
+
+      if (!obligationsRes.error)
+        setObligations((obligationsRes.data as ObligationRow[] | null ?? []).map(obligationFromRow));
+      else hadFetchError = true;
+
+      if (!transactionsRes.error)
+        setTransactions((transactionsRes.data as TransactionRow[] | null ?? []).map(transactionFromRow));
+      else hadFetchError = true;
+
+      if (!goalsRes.error) setGoals((goalsRes.data as GoalRow[] | null ?? []).map(goalFromRow));
+      else hadFetchError = true;
+
+      if (!settingsRes.error && settingsRes.data) {
+        const row = settingsRes.data as HouseholdSettingsRow;
+        setSharedSavingTargetState(Number(row.shared_saving_target));
+        setGoldTargetGramsState(Number(row.gold_target_grams));
+        if (row.gratitude_text != null) setGratitudeTextState(row.gratitude_text);
+        if (row.building_together_text != null) setBuildingTogetherTextState(row.building_together_text);
+      } else if (settingsRes.error) {
+        hadFetchError = true;
+      }
+
+      setSyncStatus(hadFetchError ? "error" : "saved");
+    })();
+
+    const unsubscribers = [
+      subscribeToTable<ProfileRow>("profiles", householdId as string, (payload) => {
+        if (payload.eventType === "DELETE") return;
+        setProfiles((prev) => upsertById(prev, profileFromRow(payload.new as ProfileRow)));
+      }),
+      subscribeToTable<CategoryRow>("categories", householdId as string, (payload) => {
+        if (payload.eventType === "DELETE") {
+          setCategories((prev) => prev.filter((c) => c.id !== (payload.old as CategoryRow).id));
+          return;
+        }
+        setCategories((prev) => upsertById(prev, categoryFromRow(payload.new as CategoryRow)));
+      }),
+      subscribeToTable<TransactionRow>("transactions", householdId as string, (payload) => {
+        if (payload.eventType === "DELETE") {
+          setTransactions((prev) => prev.filter((t) => t.id !== (payload.old as TransactionRow).id));
+          return;
+        }
+        setTransactions((prev) => upsertById(prev, transactionFromRow(payload.new as TransactionRow)));
+      }),
+      subscribeToTable<GoalRow>("goals", householdId as string, (payload) => {
+        if (payload.eventType === "DELETE") {
+          setGoals((prev) => prev.filter((g) => g.id !== (payload.old as GoalRow).id));
+          return;
+        }
+        setGoals((prev) => upsertById(prev, goalFromRow(payload.new as GoalRow)));
+      }),
+      subscribeToTable<ObligationRow>("obligations", householdId as string, (payload) => {
+        if (payload.eventType === "DELETE") {
+          setObligations((prev) => prev.filter((o) => o.id !== (payload.old as ObligationRow).id));
+          return;
+        }
+        setObligations((prev) => upsertById(prev, obligationFromRow(payload.new as ObligationRow)));
+      }),
+      subscribeToTable<HouseholdSettingsRow>("household_settings", householdId as string, (payload) => {
+        if (payload.eventType === "DELETE") return;
+        const row = payload.new as HouseholdSettingsRow;
+        setSharedSavingTargetState(Number(row.shared_saving_target));
+        setGoldTargetGramsState(Number(row.gold_target_grams));
+        if (row.gratitude_text != null) setGratitudeTextState(row.gratitude_text);
+        if (row.building_together_text != null) setBuildingTogetherTextState(row.building_together_text);
+      }),
+    ];
+
+    function handleOnline() {
+      flushPendingWrites().then(({ remaining }) => setSyncStatus(remaining > 0 ? "error" : "saved"));
+    }
+    window.addEventListener("online", handleOnline);
+
+    return () => {
+      cancelled = true;
+      unsubscribers.forEach((unsub) => unsub());
+      window.removeEventListener("online", handleOnline);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloudEnabled, householdId]);
+
+  async function connectHousehold(inviteCode: string) {
+    const result = await joinHouseholdWithInviteCode(inviteCode);
+    if (result.ok && result.householdId) {
+      setHouseholdIdInternal(result.householdId);
+    }
+    return { ok: result.ok, error: result.error };
+  }
+
+  function disconnectHousehold() {
+    clearStoredHouseholdId();
+    setHouseholdIdInternal(null);
+    setSyncStatus("idle");
+  }
+
+  function write(table: string, op: "upsert" | "delete", payload: Record<string, unknown>) {
+    if (!cloudEnabled) return;
+    void cloudWrite({ table, op, payload, onStatus: setSyncStatus });
+  }
+
   const value: DreamContextValue = {
     profiles,
-    updateProfile: (id, patch) =>
-      setProfiles((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p))),
+    updateProfile: (id, patch) => {
+      setProfiles((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+      const updated = { ...profiles.find((p) => p.id === id), ...patch, id } as PersonProfile;
+      write("profiles", "upsert", profileToRow(updated, householdId ?? ""));
+    },
 
     activeProfileId,
     setActiveProfileId: setActiveProfileIdState,
@@ -212,71 +427,114 @@ export function DreamProvider({ children }: { children: ReactNode }) {
     },
 
     categories,
-    addCategory: (c) =>
-      setCategories((prev) => [...prev, { ...c, id: makeId("c"), isCustom: true }]),
-    updateCategory: (id, patch) =>
-      setCategories((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c))),
-    deleteCategory: (id) => setCategories((prev) => prev.filter((c) => c.id !== id)),
+    addCategory: (c) => {
+      const created: Category = { ...c, id: makeId("c"), isCustom: true };
+      setCategories((prev) => [...prev, created]);
+      write("categories", "upsert", categoryToRow(created, householdId ?? ""));
+    },
+    updateCategory: (id, patch) => {
+      setCategories((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+      const updated = { ...categories.find((c) => c.id === id), ...patch, id } as Category;
+      write("categories", "upsert", categoryToRow(updated, householdId ?? ""));
+    },
+    deleteCategory: (id) => {
+      setCategories((prev) => prev.filter((c) => c.id !== id));
+      write("categories", "delete", { id });
+    },
 
     transactions,
-    addTransaction: (t) =>
-      setTransactions((prev) => [{ ...t, id: makeId("t") }, ...prev]),
-    updateTransaction: (id, patch) =>
-      setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t))),
-    deleteTransaction: (id) =>
-      setTransactions((prev) => {
-        const target = prev.find((t) => t.id === id);
-        if (target?.type === "obligation" && target.obligationId) {
-          setObligations((obs) =>
-            obs.map((o) =>
-              o.id === target.obligationId
-                ? { ...o, paidMonths: Math.max(0, o.paidMonths - 1) }
-                : o
-            )
-          );
+    addTransaction: (t) => {
+      const created: Transaction = { ...t, id: makeId("t") };
+      setTransactions((prev) => [created, ...prev]);
+      write("transactions", "upsert", transactionToRow(created, householdId ?? ""));
+    },
+    updateTransaction: (id, patch) => {
+      setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+      const updated = { ...transactions.find((t) => t.id === id), ...patch, id } as Transaction;
+      write("transactions", "upsert", transactionToRow(updated, householdId ?? ""));
+    },
+    deleteTransaction: (id) => {
+      const target = transactions.find((t) => t.id === id);
+      setTransactions((prev) => prev.filter((t) => t.id !== id));
+      write("transactions", "delete", { id });
+
+      if (target?.type === "obligation" && target.obligationId) {
+        setObligations((obs) =>
+          obs.map((o) => (o.id === target.obligationId ? { ...o, paidMonths: Math.max(0, o.paidMonths - 1) } : o))
+        );
+        const ob = obligations.find((o) => o.id === target.obligationId);
+        if (ob) {
+          const updatedOb = { ...ob, paidMonths: Math.max(0, ob.paidMonths - 1) };
+          write("obligations", "upsert", obligationToRow(updatedOb, householdId ?? ""));
         }
-        return prev.filter((t) => t.id !== id);
-      }),
+      }
+    },
 
     goals,
-    addGoal: (g) => setGoals((prev) => [...prev, { ...g, id: makeId("g") }]),
-    updateGoal: (id, patch) =>
-      setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, ...patch } : g))),
-    deleteGoal: (id) => setGoals((prev) => prev.filter((g) => g.id !== id)),
+    addGoal: (g) => {
+      const created: Goal = { ...g, id: makeId("g") };
+      setGoals((prev) => [...prev, created]);
+      write("goals", "upsert", goalToRow(created, householdId ?? ""));
+    },
+    updateGoal: (id, patch) => {
+      setGoals((prev) => prev.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+      const updated = { ...goals.find((g) => g.id === id), ...patch, id } as Goal;
+      write("goals", "upsert", goalToRow(updated, householdId ?? ""));
+    },
+    deleteGoal: (id) => {
+      setGoals((prev) => prev.filter((g) => g.id !== id));
+      write("goals", "delete", { id });
+    },
 
     obligations,
-    addObligation: (o) =>
-      setObligations((prev) => [...prev, { ...o, id: makeId("ob"), paidMonths: 0 }]),
-    updateObligation: (id, patch) =>
-      setObligations((prev) => prev.map((o) => (o.id === id ? { ...o, ...patch } : o))),
-    deleteObligation: (id) => setObligations((prev) => prev.filter((o) => o.id !== id)),
+    addObligation: (o) => {
+      const created: Obligation = { ...o, id: makeId("ob"), paidMonths: 0 };
+      setObligations((prev) => [...prev, created]);
+      write("obligations", "upsert", obligationToRow(created, householdId ?? ""));
+    },
+    updateObligation: (id, patch) => {
+      setObligations((prev) => prev.map((o) => (o.id === id ? { ...o, ...patch } : o)));
+      const updated = { ...obligations.find((o) => o.id === id), ...patch, id } as Obligation;
+      write("obligations", "upsert", obligationToRow(updated, householdId ?? ""));
+    },
+    deleteObligation: (id) => {
+      setObligations((prev) => prev.filter((o) => o.id !== id));
+      write("obligations", "delete", { id });
+    },
     recordObligationPayment: (obligationId, date) => {
       const ob = obligations.find((o) => o.id === obligationId);
       if (!ob) return;
-      setTransactions((prev) => [
-        {
-          id: makeId("t"),
-          type: "obligation",
-          name: ob.name,
-          amount: ob.monthlyAmount,
-          date,
-          obligationId,
-        },
-        ...prev,
-      ]);
-      setObligations((prev) =>
-        prev.map((o) =>
-          o.id === obligationId ? { ...o, paidMonths: Math.min(o.totalMonths, o.paidMonths + 1) } : o
-        )
-      );
+      const paymentTx: Transaction = {
+        id: makeId("t"),
+        type: "obligation",
+        name: ob.name,
+        amount: ob.monthlyAmount,
+        date,
+        obligationId,
+      };
+      setTransactions((prev) => [paymentTx, ...prev]);
+      write("transactions", "upsert", transactionToRow(paymentTx, householdId ?? ""));
+
+      const updatedOb = { ...ob, paidMonths: Math.min(ob.totalMonths, ob.paidMonths + 1) };
+      setObligations((prev) => prev.map((o) => (o.id === obligationId ? updatedOb : o)));
+      write("obligations", "upsert", obligationToRow(updatedOb, householdId ?? ""));
     },
 
     sharedSavingTarget,
-    setSharedSavingTarget: setSharedSavingTargetState,
+    setSharedSavingTarget: (amount) => {
+      setSharedSavingTargetState(amount);
+      write("household_settings", "upsert", { household_id: householdId ?? "", shared_saving_target: amount });
+    },
 
     goldTargetGrams,
-    setGoldTargetGrams: setGoldTargetGramsState,
+    setGoldTargetGrams: (grams) => {
+      setGoldTargetGramsState(grams);
+      write("household_settings", "upsert", { household_id: householdId ?? "", gold_target_grams: grams });
+    },
 
+    // Uploaded memories/receipts and the custom brand logo stay local-only for now — they
+    // are base64 data URLs (up to several MB each), a materially different sync problem
+    // (blob storage, not row sync) than the financial data this pass targets.
     files,
     addFile: async (file, category) => {
       const { file_url } = await base44.integrations.Core.UploadFile({ file });
@@ -295,12 +553,24 @@ export function DreamProvider({ children }: { children: ReactNode }) {
     removeFile: (id) => setFiles((prev) => prev.filter((f) => f.id !== id)),
 
     gratitudeText,
-    setGratitudeText: setGratitudeTextState,
+    setGratitudeText: (v) => {
+      setGratitudeTextState(v);
+      write("household_settings", "upsert", { household_id: householdId ?? "", gratitude_text: v });
+    },
     buildingTogetherText,
-    setBuildingTogetherText: setBuildingTogetherTextState,
+    setBuildingTogetherText: (v) => {
+      setBuildingTogetherTextState(v);
+      write("household_settings", "upsert", { household_id: householdId ?? "", building_together_text: v });
+    },
 
     hasOnboarded,
     setHasOnboarded: setHasOnboardedState,
+
+    isCloudConfigured: isSupabaseConfigured,
+    isHouseholdConnected: cloudEnabled,
+    syncStatus,
+    connectHousehold,
+    disconnectHousehold,
   };
 
   return <DreamContext.Provider value={value}>{children}</DreamContext.Provider>;

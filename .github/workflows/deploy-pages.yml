@@ -34,6 +34,11 @@ jobs:
         run: npm run build
         env:
           GITHUB_PAGES: true
+          # Set these under Settings -> Secrets and variables -> Actions in this repo.
+          # If left unset, the build still succeeds — the deployed app just falls back
+          # to local-only (no cloud sync), exactly like local dev without a .env file.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
 
       - name: Add SPA fallback for GitHub Pages (404 -> index.html)
         run: cp dist/index.html dist/404.html

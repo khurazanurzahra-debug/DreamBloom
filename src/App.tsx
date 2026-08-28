@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import Launch from "./pages/Launch";
 import VideoOnboarding from "./pages/VideoOnboarding";
+import ConnectHousehold from "./pages/ConnectHousehold";
 import Profile from "./pages/Profile";
 import OurBeginning from "./pages/OurBeginning";
 import Home from "./pages/Home";
@@ -17,6 +18,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<Launch />} />
       <Route path="/onboarding" element={<VideoOnboarding />} />
+      <Route path="/connect-household" element={<ConnectHousehold />} />
       <Route path="/profile" element={<Profile />} />
       <Route path="/our-beginning" element={<OurBeginning />} />
       <Route path="/app/home" element={<Home />} />
