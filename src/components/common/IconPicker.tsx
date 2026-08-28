@@ -70,19 +70,27 @@ export default function IconPicker({
           <button
             key={name}
             type="button"
-            onClick={() => onChange(name)}
+            onClick={() => {
+              // TEMPORARY diagnostic — remove once selection is confirmed fixed. Logs no
+              // user/financial data, only the icon identifier being clicked.
+              console.log("[DreamBloom icon]", { clicked: name });
+              onChange(name);
+            }}
             aria-label={name}
             aria-pressed={selected}
-            className={`flex h-12 w-12 items-center justify-center rounded-xl border transition active:scale-95 ${
-              selected ? "ring-2 ring-gold" : ""
+            className={`flex h-12 w-12 items-center justify-center rounded-xl border-2 transition active:scale-95 ${
+              selected ? "ring-2 ring-gold ring-offset-1" : ""
             }`}
             style={{
-              backgroundColor: softIconBackground(tint, 22),
-              borderColor: softCardBorder(tint, 30),
+              backgroundColor: softIconBackground(tint, selected ? 45 : 22),
+              borderColor: selected ? "#2B2620" : softCardBorder(tint, 30),
               boxShadow: softCardShadow(),
             }}
           >
-            <Icon name={name} size={22} style={{ color: tint }} />
+            {/* The glyph must never be an independent hit-target — without this, taps
+                landing on the SVG's stroke paths (rather than the button's own solid
+                background) can fail to register as a click on some mobile browsers. */}
+            <Icon name={name} size={22} style={{ color: tint }} className="pointer-events-none" />
           </button>
         );
       })}
