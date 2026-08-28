@@ -270,7 +270,72 @@ export function DreamProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!cloudEnabled || !supabase) return;
+    const client = supabase;
     let cancelled = false;
+    let hydrating = false;
+
+    // Pulls the household's full current state from the cloud and replaces local state
+    // with it. This is called at bootstrap AND again whenever the app becomes visible or
+    // regains connectivity — the initial bootstrap fetch alone is not enough, because a
+    // device that was already open before another device wrote something depends
+    // entirely on its realtime subscription to learn about it, and mobile browsers
+    // (iOS Safari in particular) routinely suspend background WebSocket connections
+    // without any visible error. Re-hydrating on return is what makes cloud data
+    // reliably show up even if that connection silently died in the background.
+    async function hydrateFromCloud() {
+      if (cancelled || hydrating) return;
+      hydrating = true;
+      try {
+        const [profilesRes, categoriesRes, obligationsRes, transactionsRes, goalsRes, settingsRes] =
+          await Promise.all([
+            client.from("profiles").select("*").eq("household_id", householdId as string),
+            client.from("categories").select("*").eq("household_id", householdId as string),
+            client.from("obligations").select("*").eq("household_id", householdId as string),
+            client.from("transactions").select("*").eq("household_id", householdId as string),
+            client.from("goals").select("*").eq("household_id", householdId as string),
+            client.from("household_settings").select("*").eq("household_id", householdId as string).maybeSingle(),
+          ]);
+        if (cancelled) return;
+
+        // A genuinely empty cloud table (no error, zero rows) must still replace stale
+        // local state — otherwise a table that's legitimately empty in the cloud would
+        // leave old local rows on screen forever. A *failed* fetch must do the opposite:
+        // never touch local state, since we can't tell "empty" from "couldn't check".
+        let hadFetchError = false;
+
+        if (!profilesRes.error) setProfiles((profilesRes.data as ProfileRow[] | null ?? []).map(profileFromRow));
+        else hadFetchError = true;
+
+        if (!categoriesRes.error)
+          setCategories((categoriesRes.data as CategoryRow[] | null ?? []).map(categoryFromRow));
+        else hadFetchError = true;
+
+        if (!obligationsRes.error)
+          setObligations((obligationsRes.data as ObligationRow[] | null ?? []).map(obligationFromRow));
+        else hadFetchError = true;
+
+        if (!transactionsRes.error)
+          setTransactions((transactionsRes.data as TransactionRow[] | null ?? []).map(transactionFromRow));
+        else hadFetchError = true;
+
+        if (!goalsRes.error) setGoals((goalsRes.data as GoalRow[] | null ?? []).map(goalFromRow));
+        else hadFetchError = true;
+
+        if (!settingsRes.error && settingsRes.data) {
+          const row = settingsRes.data as HouseholdSettingsRow;
+          setSharedSavingTargetState(Number(row.shared_saving_target));
+          setGoldTargetGramsState(Number(row.gold_target_grams));
+          if (row.gratitude_text != null) setGratitudeTextState(row.gratitude_text);
+          if (row.building_together_text != null) setBuildingTogetherTextState(row.building_together_text);
+        } else if (settingsRes.error) {
+          hadFetchError = true;
+        }
+
+        setSyncStatus(hadFetchError ? "error" : "saved");
+      } finally {
+        hydrating = false;
+      }
+    }
 
     (async () => {
       const signedIn = await ensureSession();
@@ -281,52 +346,7 @@ export function DreamProvider({ children }: { children: ReactNode }) {
       await migrateLocalDataToCloud(householdId as string, snapshotRef.current);
       if (cancelled) return;
 
-      const [profilesRes, categoriesRes, obligationsRes, transactionsRes, goalsRes, settingsRes] =
-        await Promise.all([
-          supabase.from("profiles").select("*").eq("household_id", householdId as string),
-          supabase.from("categories").select("*").eq("household_id", householdId as string),
-          supabase.from("obligations").select("*").eq("household_id", householdId as string),
-          supabase.from("transactions").select("*").eq("household_id", householdId as string),
-          supabase.from("goals").select("*").eq("household_id", householdId as string),
-          supabase.from("household_settings").select("*").eq("household_id", householdId as string).maybeSingle(),
-        ]);
-      if (cancelled) return;
-
-      // A genuinely empty cloud table (no error, zero rows) must still replace stale
-      // local state — otherwise a table that's legitimately empty in the cloud would
-      // leave old local rows on screen forever. A *failed* fetch must do the opposite:
-      // never touch local state, since we can't tell "empty" from "couldn't check".
-      let hadFetchError = false;
-
-      if (!profilesRes.error) setProfiles((profilesRes.data as ProfileRow[] | null ?? []).map(profileFromRow));
-      else hadFetchError = true;
-
-      if (!categoriesRes.error)
-        setCategories((categoriesRes.data as CategoryRow[] | null ?? []).map(categoryFromRow));
-      else hadFetchError = true;
-
-      if (!obligationsRes.error)
-        setObligations((obligationsRes.data as ObligationRow[] | null ?? []).map(obligationFromRow));
-      else hadFetchError = true;
-
-      if (!transactionsRes.error)
-        setTransactions((transactionsRes.data as TransactionRow[] | null ?? []).map(transactionFromRow));
-      else hadFetchError = true;
-
-      if (!goalsRes.error) setGoals((goalsRes.data as GoalRow[] | null ?? []).map(goalFromRow));
-      else hadFetchError = true;
-
-      if (!settingsRes.error && settingsRes.data) {
-        const row = settingsRes.data as HouseholdSettingsRow;
-        setSharedSavingTargetState(Number(row.shared_saving_target));
-        setGoldTargetGramsState(Number(row.gold_target_grams));
-        if (row.gratitude_text != null) setGratitudeTextState(row.gratitude_text);
-        if (row.building_together_text != null) setBuildingTogetherTextState(row.building_together_text);
-      } else if (settingsRes.error) {
-        hadFetchError = true;
-      }
-
-      setSyncStatus(hadFetchError ? "error" : "saved");
+      await hydrateFromCloud();
     })();
 
     const unsubscribers = [
@@ -373,14 +393,31 @@ export function DreamProvider({ children }: { children: ReactNode }) {
     ];
 
     function handleOnline() {
-      flushPendingWrites().then(({ remaining }) => setSyncStatus(remaining > 0 ? "error" : "saved"));
+      flushPendingWrites().then(({ remaining }) => {
+        setSyncStatus(remaining > 0 ? "error" : "saved");
+        // Coming back online is exactly when this device may have missed remote
+        // changes (its realtime socket almost certainly dropped while offline) —
+        // pull a fresh snapshot rather than trusting the socket to have caught up.
+        void hydrateFromCloud();
+      });
     }
     window.addEventListener("online", handleOnline);
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        // Covers the case a realtime channel silently dies while the app is
+        // backgrounded (routine on iOS Safari/PWA) — returning to the app re-pulls
+        // the household's current state instead of relying solely on that socket.
+        void hydrateFromCloud();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
       unsubscribers.forEach((unsub) => unsub());
       window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloudEnabled, householdId]);

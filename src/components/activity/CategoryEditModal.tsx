@@ -8,6 +8,9 @@ import ColorSwatchPicker from "../common/ColorSwatchPicker";
 import Button from "../ui/Button";
 import IconButton from "../ui/IconButton";
 import ConfirmDialog from "../ui/ConfirmDialog";
+import { deterministicCategoryColor } from "../../lib/categoryColor";
+
+const DEFAULT_COLOR = "#F3C9B4";
 
 export default function CategoryEditModal({
   category,
@@ -19,7 +22,7 @@ export default function CategoryEditModal({
   const { addCategory, updateCategory, deleteCategory } = useDream();
   const [name, setName] = useState(category?.name ?? "");
   const [icon, setIcon] = useState(category?.icon ?? "Sparkles");
-  const [color, setColor] = useState(category?.color ?? "#F3C9B4");
+  const [color, setColor] = useState(category?.color ?? DEFAULT_COLOR);
   const [budgetAmount, setBudgetAmount] = useState(
     category?.budgetAmount ? String(category.budgetAmount) : ""
   );
@@ -28,11 +31,17 @@ export default function CategoryEditModal({
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim()) return;
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+    // New categories the user never touched the swatch picker for get a deterministic
+    // color based on their name instead of every new category sharing the same fixed
+    // default — editing an existing category never runs this, so its color is untouched
+    // unless the user explicitly changes it via the picker.
+    const resolvedColor = !category && color === DEFAULT_COLOR ? deterministicCategoryColor(trimmedName) : color;
     const patch = {
-      name: name.trim(),
+      name: trimmedName,
       icon,
-      color,
+      color: resolvedColor,
       budgetAmount: budgetAmount ? Number(budgetAmount) : undefined,
       budgetPeriod: budgetAmount ? budgetPeriod : undefined,
     };

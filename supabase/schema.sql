@@ -9,7 +9,11 @@
 -- create additional households; only someone who already knows the invite code you set
 -- below can join the one that exists.
 
-create extension if not exists pgcrypto;
+-- Supabase projects install extensions into the `extensions` schema by default (not
+-- `public`) for security. `IF NOT EXISTS` means this is a no-op if pgcrypto is already
+-- installed there (the normal case on Supabase) — the `with schema` clause only matters
+-- the first time pgcrypto is actually created.
+create extension if not exists pgcrypto with schema extensions;
 
 -- ============================================================
 -- TABLES
@@ -250,6 +254,12 @@ end $$;
 -- JOIN HOUSEHOLD (invite code) — the only way a client can ever attach to a household.
 -- The invite code itself is never stored or exposed in plaintext; only its hash is
 -- compared, server-side, inside this function.
+--
+-- NOTE on extensions.crypt(): this function intentionally keeps `set search_path =
+-- public` (not widened to include `extensions`) — that's the safer choice for a
+-- security-definer function, since a narrower search_path is a smaller attack surface.
+-- pgcrypto's crypt() lives in the `extensions` schema on Supabase, so it's called fully
+-- schema-qualified here instead of relying on search_path to find it.
 -- ============================================================
 
 create or replace function join_household(p_invite_code text)
@@ -263,7 +273,7 @@ declare
 begin
   select id into v_household_id
   from households
-  where invite_code_hash = crypt(p_invite_code, invite_code_hash)
+  where invite_code_hash = extensions.crypt(p_invite_code, invite_code_hash)
   limit 1;
 
   if v_household_id is null then
@@ -300,7 +310,7 @@ grant execute on function join_household(text) to authenticated, anon;
 -- whole script never creates a second household or an orphaned profile row. If you need
 -- to CHANGE the invite code after the household already exists, this block will no
 -- longer run (by design) — instead run, in the SQL Editor:
---   update households set invite_code_hash = crypt('your-new-code', gen_salt('bf'));
+--   update households set invite_code_hash = extensions.crypt('your-new-code', extensions.gen_salt('bf'));
 -- ============================================================
 
 do $$
@@ -309,7 +319,7 @@ declare
 begin
   if not exists (select 1 from households) then
     insert into households (name, invite_code_hash)
-    values ('DreamBloom Household', crypt('change-this-invite-code', gen_salt('bf')))
+    values ('DreamBloom Household', extensions.crypt('change-this-invite-code', extensions.gen_salt('bf')))
     returning id into v_household_id;
 
     -- Seed Khuraza & Yusuf's profiles under that household (matches the app's existing
